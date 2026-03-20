@@ -31,12 +31,10 @@ def scrape_task():
         print(f"❌ 请求主 JS 失败: {e}")
         return
 
-    # 提取 HTML 标签
     html_snippets = re.findall(r"document\.write\('(.*?)'\);", response.text)
     html_content = "".join(html_snippets)
     soup = BeautifulSoup(html_content, 'html.parser')
 
-    # 【重要修复1】：使用 CSS 选择器，避免多个 class 导致匹配不到
     match_lists = soup.select('ul.item.play')
     print(f"📊 成功解析 JS 文件，共找到 {len(match_lists)} 场比赛信息。")
 
@@ -52,7 +50,6 @@ def scrape_task():
             match_time_naive = datetime.strptime(f"{current_year}-{time_str}", "%Y-%m-%d %H:%M")
             match_time = tz.localize(match_time_naive)
             
-            # 处理跨年
             if match_time > now + timedelta(days=300):
                 match_time = tz.localize(match_time_naive.replace(year=current_year - 1))
             elif match_time < now - timedelta(days=300):
@@ -62,40 +59,52 @@ def scrape_task():
 
         time_diff = (match_time - now).total_seconds() / 3600
         
-        # 筛选前后 3 小时内的比赛
         if -3 <= time_diff <= 3:
             print(f"🕒 找到符合时间的比赛: {time_str}")
             links = match.find_all('a', href=re.compile(r'play\.sportsteam368\.com'))
             
             for link in links:
                 match_url = link.get('href')
+                print(f"   🔗 正在访问详情页: {match_url}")
                 
                 try:
                     match_res = requests.get(match_url, headers=headers, timeout=10)
                     match_res.encoding = 'utf-8'
                     match_soup = BeautifulSoup(match_res.text, 'html.parser')
                     
-                    # 【重要修复2】：无视嵌套的 html 标签，只要包含了“高清直播”这四个字就直接抓取
                     hd_links = [a for a in match_soup.find_all('a') if '高清直播' in a.get_text()]
                     
                     if not hd_links:
-                        print(f"   ⚠️ 此链接无'高清直播'选项: {match_url}")
+                        print(f"   ⚠️ 此链接无'高清直播'选项")
                         continue
 
                     for hd in hd_links:
                         data_play = hd.get('data-play')
                         if data_play:
                             play_url = f"http://play.sportsteam368.com{data_play}"
+                            print(f"   ➡️ 获取到播放源 URL: {play_url}")
                             
-                            play_res = requests.get(play_url, headers=headers, timeout=10)
+                            # 动态伪造 Referer 为当前比赛详情页，防止被防盗链拦截
+                            play_headers = headers.copy()
+                            play_headers['Referer'] = match_url
+                            
+                            play_res = requests.get(play_url, headers=play_headers, timeout=10)
+                            play_res.encoding = 'utf-8'
+                            
+                            # 尝试匹配 ID
                             id_match = re.search(r'paps\.html\?id=([A-Za-z0-9+/=]+)', play_res.text)
                             
                             if id_match:
                                 extracted_id = id_match.group(1)
                                 target_ids.add(extracted_id)
-                                print(f"   ✅ 成功提取 ID: {extracted_id[:15]}...")
+                                print(f"   ✅ 成功提取 ID: {extracted_id[:20]}...")
+                            else:
+                                # 这是最关键的一步！打印出到底返回了什么，抓不到的原因就在这里！
+                                snippet = play_res.text[:300].replace('\n', ' ')
+                                print(f"   ❌ 未能从该播放页匹配到 ID！服务器返回的页面前300字符是: \n      {snippet}")
+
                 except Exception as e:
-                    print(f"   ❌ 请求详情页失败: {e}")
+                    print(f"   ❌ 请求页面时发生异常: {e}")
 
     with open(FILE_PATH, 'w', encoding='utf-8') as f:
         for item in target_ids:
@@ -103,7 +112,6 @@ def scrape_task():
     
     print(f"🎉 抓取任务完成！共提取 {len(target_ids)} 个不重复的 ID。")
 
-# 定时任务：每 30 分钟一次
 scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
 scheduler.add_job(func=scrape_task, trigger="interval", minutes=30, id='scrape_job', replace_existing=True)
 scheduler.start()
