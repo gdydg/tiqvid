@@ -9,6 +9,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 app = Flask(__name__)
 FILE_PATH = 'ids.txt'
+DEBUG_FILE_PATH = 'debug_page.html' # 新增：用于保存调试网页
 
 def scrape_task():
     tz = pytz.timezone('Asia/Shanghai')
@@ -36,9 +37,9 @@ def scrape_task():
     soup = BeautifulSoup(html_content, 'html.parser')
 
     match_lists = soup.select('ul.item.play')
-    print(f"📊 成功解析 JS 文件，共找到 {len(match_lists)} 场比赛信息。")
-
+    
     target_ids = set()
+    debug_saved = False # 标记是否已经保存过调试文件，只存一次就够了
     
     for match in match_lists:
         time_li = match.find('li', class_='lab_time')
@@ -60,51 +61,43 @@ def scrape_task():
         time_diff = (match_time - now).total_seconds() / 3600
         
         if -3 <= time_diff <= 3:
-            print(f"🕒 找到符合时间的比赛: {time_str}")
             links = match.find_all('a', href=re.compile(r'play\.sportsteam368\.com'))
             
             for link in links:
                 match_url = link.get('href')
-                print(f"   🔗 正在访问详情页: {match_url}")
-                
                 try:
                     match_res = requests.get(match_url, headers=headers, timeout=10)
                     match_res.encoding = 'utf-8'
                     match_soup = BeautifulSoup(match_res.text, 'html.parser')
                     
                     hd_links = [a for a in match_soup.find_all('a') if '高清直播' in a.get_text()]
-                    
-                    if not hd_links:
-                        print(f"   ⚠️ 此链接无'高清直播'选项")
-                        continue
 
                     for hd in hd_links:
                         data_play = hd.get('data-play')
                         if data_play:
                             play_url = f"http://play.sportsteam368.com{data_play}"
-                            print(f"   ➡️ 获取到播放源 URL: {play_url}")
                             
-                            # 动态伪造 Referer 为当前比赛详情页，防止被防盗链拦截
                             play_headers = headers.copy()
                             play_headers['Referer'] = match_url
                             
                             play_res = requests.get(play_url, headers=play_headers, timeout=10)
                             play_res.encoding = 'utf-8'
                             
-                            # 尝试匹配 ID
+                            # 注意：这行正是原来提取失败的地方！
                             id_match = re.search(r'paps\.html\?id=([A-Za-z0-9+/=]+)', play_res.text)
                             
                             if id_match:
-                                extracted_id = id_match.group(1)
-                                target_ids.add(extracted_id)
-                                print(f"   ✅ 成功提取 ID: {extracted_id[:20]}...")
+                                target_ids.add(id_match.group(1))
                             else:
-                                # 这是最关键的一步！打印出到底返回了什么，抓不到的原因就在这里！
-                                snippet = play_res.text[:300].replace('\n', ' ')
-                                print(f"   ❌ 未能从该播放页匹配到 ID！服务器返回的页面前300字符是: \n      {snippet}")
+                                # 如果内容大于 100 字符（排除那个只有一个点 '.' 的页面）并且还没保存过
+                                if len(play_res.text) > 100 and not debug_saved:
+                                    with open(DEBUG_FILE_PATH, 'w', encoding='utf-8') as df:
+                                        df.write(play_res.text)
+                                    debug_saved = True
+                                    print(f"⚠️ 发现格式不匹配的页面！已将网页源码保存至 /{DEBUG_FILE_PATH} 供排查。")
 
                 except Exception as e:
-                    print(f"   ❌ 请求页面时发生异常: {e}")
+                    pass
 
     with open(FILE_PATH, 'w', encoding='utf-8') as f:
         for item in target_ids:
@@ -122,7 +115,14 @@ scrape_task()
 def get_ids():
     if os.path.exists(FILE_PATH) and os.path.getsize(FILE_PATH) > 0:
         return send_file(FILE_PATH, mimetype='text/plain')
-    return "✅ 抓取脚本运行正常，但目前文件中没有任何 ID。请去后台查看 Logs 获取详细抓取过程！", 200
+    return "✅ 抓取运行完成。但未提取到ID。请访问 /debug 查看失败页面的源码", 200
+
+# 新增一个接口，让你直接在浏览器里查看那个包含真实 ID 结构的 HTML
+@app.route('/debug')
+def view_debug():
+    if os.path.exists(DEBUG_FILE_PATH):
+        return send_file(DEBUG_FILE_PATH, mimetype='text/html')
+    return "暂时没有抓取到可以调试的页面", 404
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
