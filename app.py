@@ -9,7 +9,6 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 app = Flask(__name__)
 FILE_PATH = 'ids.txt'
-DEBUG_FILE_PATH = 'debug_page.html' # 新增：用于保存调试网页
 
 def scrape_task():
     tz = pytz.timezone('Asia/Shanghai')
@@ -37,9 +36,9 @@ def scrape_task():
     soup = BeautifulSoup(html_content, 'html.parser')
 
     match_lists = soup.select('ul.item.play')
-    
+    print(f"📊 成功解析 JS 文件，共找到 {len(match_lists)} 场比赛信息。")
+
     target_ids = set()
-    debug_saved = False # 标记是否已经保存过调试文件，只存一次就够了
     
     for match in match_lists:
         time_li = match.find('li', class_='lab_time')
@@ -60,11 +59,14 @@ def scrape_task():
 
         time_diff = (match_time - now).total_seconds() / 3600
         
+        # 筛选前后 3 小时内的比赛
         if -3 <= time_diff <= 3:
+            print(f"🕒 找到符合时间的比赛: {time_str}")
             links = match.find_all('a', href=re.compile(r'play\.sportsteam368\.com'))
             
             for link in links:
                 match_url = link.get('href')
+                
                 try:
                     match_res = requests.get(match_url, headers=headers, timeout=10)
                     match_res.encoding = 'utf-8'
@@ -83,21 +85,25 @@ def scrape_task():
                             play_res = requests.get(play_url, headers=play_headers, timeout=10)
                             play_res.encoding = 'utf-8'
                             
-                            # 注意：这行正是原来提取失败的地方！
-                            id_match = re.search(r'paps\.html\?id=([A-Za-z0-9+/=]+)', play_res.text)
+                            # 【核心修改区】：同时兼容新旧两种数据下发规则！
+                            # 1. 优先尝试提取新的变量 var encodedStr = '...'
+                            id_match_new = re.search(r"var\s+encodedStr\s*=\s*['\"]([A-Za-z0-9+/=]+)['\"]", play_res.text)
+                            # 2. 备选尝试旧版 paps.html?id=...
+                            id_match_old = re.search(r'paps\.html\?id=([A-Za-z0-9+/=]+)', play_res.text)
                             
-                            if id_match:
-                                target_ids.add(id_match.group(1))
+                            if id_match_new:
+                                extracted_id = id_match_new.group(1)
+                                target_ids.add(extracted_id)
+                                print(f"   ✅ [新结构] 成功提取 ID: {extracted_id[:20]}...")
+                            elif id_match_old:
+                                extracted_id = id_match_old.group(1)
+                                target_ids.add(extracted_id)
+                                print(f"   ✅ [旧结构] 成功提取 ID: {extracted_id[:20]}...")
                             else:
-                                # 如果内容大于 100 字符（排除那个只有一个点 '.' 的页面）并且还没保存过
-                                if len(play_res.text) > 100 and not debug_saved:
-                                    with open(DEBUG_FILE_PATH, 'w', encoding='utf-8') as df:
-                                        df.write(play_res.text)
-                                    debug_saved = True
-                                    print(f"⚠️ 发现格式不匹配的页面！已将网页源码保存至 /{DEBUG_FILE_PATH} 供排查。")
+                                print(f"   ❌ 该源既不符合新结构也不符合旧结构。URL: {play_url}")
 
                 except Exception as e:
-                    pass
+                    print(f"   ❌ 请求页面时发生异常: {e}")
 
     with open(FILE_PATH, 'w', encoding='utf-8') as f:
         for item in target_ids:
@@ -109,20 +115,14 @@ scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
 scheduler.add_job(func=scrape_task, trigger="interval", minutes=30, id='scrape_job', replace_existing=True)
 scheduler.start()
 
+# 启动时先执行一次
 scrape_task()
 
 @app.route('/')
 def get_ids():
     if os.path.exists(FILE_PATH) and os.path.getsize(FILE_PATH) > 0:
         return send_file(FILE_PATH, mimetype='text/plain')
-    return "✅ 抓取运行完成。但未提取到ID。请访问 /debug 查看失败页面的源码", 200
-
-# 新增一个接口，让你直接在浏览器里查看那个包含真实 ID 结构的 HTML
-@app.route('/debug')
-def view_debug():
-    if os.path.exists(DEBUG_FILE_PATH):
-        return send_file(DEBUG_FILE_PATH, mimetype='text/html')
-    return "暂时没有抓取到可以调试的页面", 404
+    return "✅ 抓取运行完成。但未提取到ID（可能当前前后3小时无符合条件的比赛）。", 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
